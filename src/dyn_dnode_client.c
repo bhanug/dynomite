@@ -296,7 +296,8 @@ dnode_req_forward(struct context *ctx, struct conn *conn, struct msg *req)
 
     ASSERT(req->dmsg != NULL);
     if (req->dmsg->type == DMSG_REQ) {
-       local_req_forward(ctx, conn, req, key, keylen);
+       rstatus_t s = local_req_forward(ctx, conn, req, key, keylen);
+       IGNORE_RET_VAL(s);
     } else if (req->dmsg->type == DMSG_REQ_FORWARD) {
         struct mbuf *orig_mbuf = STAILQ_FIRST(&req->mhdr);
         struct datacenter *dc = server_get_dc(pool, &pool->dc);
@@ -328,7 +329,8 @@ dnode_req_forward(struct context *ctx, struct conn *conn, struct msg *req)
                            dn_unresolve_peer_desc(conn->sd), rack->name->len, rack->name->data, rack->dc->len, rack->dc->data);
             }
 
-            remote_req_forward(ctx, conn, rack_msg, rack, key, keylen);
+            rstatus_t s = remote_req_forward(ctx, conn, rack_msg, rack, key, keylen);
+            IGNORE_RET_VAL(s);
         }
     }
 }

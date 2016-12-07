@@ -543,7 +543,7 @@ req_forward_stats(struct context *ctx, struct msg *req)
     }
 }
 
-void
+rstatus_t
 local_req_forward(struct context *ctx, struct conn *c_conn, struct msg *req,
                   uint8_t *key, uint32_t keylen)
 {
@@ -566,7 +566,7 @@ local_req_forward(struct context *ctx, struct conn *c_conn, struct msg *req,
     log_debug(LOG_VERB, "c_conn %p got server conn %p", c_conn, s_conn);
     if (s_conn == NULL) {
         req_forward_error(ctx, c_conn, req, errno);
-        return;
+        return DN_OK;
     }
     ASSERT(s_conn->type == CONN_SERVER);
 
@@ -583,23 +583,23 @@ local_req_forward(struct context *ctx, struct conn *c_conn, struct msg *req,
             if (status != DN_OK) {
                 req_forward_error(ctx, c_conn, req, errno);
                 s_conn->err = errno;
-                return;
+                return DN_OK;
             }
         }
     } else if (ctx->dyn_state == STANDBY) {  //no reads/writes from peers/clients
         log_debug(LOG_INFO, "Node is in STANDBY state. Drop write/read requests");
         req_forward_error(ctx, c_conn, req, errno);
-        return;
+        return DN_OK;
     } else if (ctx->dyn_state == WRITES_ONLY && req->is_read) {
         //no reads from peers/clients but allow writes from peers/clients
         log_debug(LOG_INFO, "Node is in WRITES_ONLY state. Drop read requests");
         req_forward_error(ctx, c_conn, req, errno);
-        return;
+        return DN_OK;
     } else if (ctx->dyn_state == RESUMING) {
         log_debug(LOG_INFO, "Node is in RESUMING state. Still drop read requests and flush out all the queued writes");
         if (req->is_read) {
             req_forward_error(ctx, c_conn, req, errno);
-            return;
+            return DN_OK;
         }
 
         status = conn_event_add_out(s_conn);
@@ -607,7 +607,7 @@ local_req_forward(struct context *ctx, struct conn *c_conn, struct msg *req,
         if (status != DN_OK) {
             req_forward_error(ctx, c_conn, req, errno);
             s_conn->err = errno;
-            return;
+            return DN_OK;
         }
     }
 
@@ -623,6 +623,7 @@ local_req_forward(struct context *ctx, struct conn *c_conn, struct msg *req,
                 " type %d with key '%.*s'", c_conn->sd, s_conn->sd, req->id,
                 req->mlen, req->type, keylen, key);
     }
+    return DN_OK;
 }
 
 
@@ -647,10 +648,11 @@ admin_local_req_forward(struct context *ctx, struct conn *c_conn, struct msg *re
     }
 
     log_debug(LOG_NOTICE, "Need to delete [%.*s] ", keylen, key);
-    local_req_forward(ctx, c_conn, req, key, keylen);
+    rstatus_t s = local_req_forward(ctx, c_conn, req, key, keylen);
+    IGNORE_RET_VAL(s);
 }
 
-void
+rstatus_t
 remote_req_forward(struct context *ctx, struct conn *c_conn, struct msg *req, 
                    struct rack *rack, uint8_t *key, uint32_t keylen)
 {
@@ -662,8 +664,7 @@ remote_req_forward(struct context *ctx, struct conn *c_conn, struct msg *req,
     if (peer->is_local) {
         log_debug(LOG_VERB, "c_conn: %p forwarding %d:%d is local", c_conn,
                   req->id, req->parent_id);
-        local_req_forward(ctx, c_conn, req, key, keylen);
-        return;
+        return local_req_forward(ctx, c_conn, req, key, keylen);
     }
 
     /* enqueue message (request) into client outq, if response is expected */
@@ -685,14 +686,14 @@ remote_req_forward(struct context *ctx, struct conn *c_conn, struct msg *req,
         // No response for DC_ONE & swallow
         if ((req->consistency == DC_ONE) && (req->swallow)) {
             msg_put(req);
-            return;
+            return DN_OK;
         }
         // No response for remote dc
         struct server_pool *pool = c_conn->owner;
         bool same_dc = is_same_dc(pool, peer)? 1 : 0;
         if (!same_dc) {
             msg_put(req);
-            return;
+            return DN_OK;
         }
         // All other cases return a response
         struct msg *rsp = msg_get(c_conn, false, __FUNCTION__);
@@ -710,12 +711,13 @@ remote_req_forward(struct context *ctx, struct conn *c_conn, struct msg *req,
                              rsp);
         if (req->swallow)
             msg_put(req);
-        return;
+        return DN_OK;
     }
 
     log_debug(LOG_VERB, "c_conn: %p forwarding %d:%d to p_conn %p", c_conn,
             req->id, req->parent_id, p_conn);
     dnode_peer_req_forward(ctx, c_conn, p_conn, req, rack, key, keylen);
+    return DN_OK;
 }
 
 static void
@@ -761,7 +763,8 @@ req_forward_all_local_racks(struct context *ctx, struct conn *c_conn,
         }
         log_debug(LOG_VERB, "c_conn: %p forwarding (%d:%d)",
                 c_conn, rack_msg->id, rack_msg->parent_id);
-        remote_req_forward(ctx, c_conn, rack_msg, rack, key, keylen);
+        rstatus_t s = remote_req_forward(ctx, c_conn, rack_msg, rack, key, keylen);
+        IGNORE_RET_VAL(s);
     }
 }
 
@@ -825,7 +828,8 @@ req_forward_remote_dc(struct context *ctx, struct conn *c_conn, struct msg *req,
         log_debug(LOG_DEBUG, "forwarding request to conn '%s' on rack '%.*s'",
                 dn_unresolve_peer_desc(c_conn->sd), rack->name->len, rack->name->data);
     }
-    remote_req_forward(ctx, c_conn, rack_msg, rack, key, keylen);
+    rstatus_t s = remote_req_forward(ctx, c_conn, rack_msg, rack, key, keylen);
+    IGNORE_RET_VAL(s);
 }
 
 static void
@@ -843,7 +847,8 @@ req_forward_local_dc(struct context *ctx, struct conn *c_conn, struct msg *req,
         req->rsp_handler = msg_get_rsp_handler(req);
         struct rack * rack = server_get_rack_by_dc_rack(pool, &pool->rack,
                                                         &pool->dc);
-        remote_req_forward(ctx, c_conn, req, rack, key, keylen);
+        rstatus_t s = remote_req_forward(ctx, c_conn, req, rack, key, keylen);
+        IGNORE_RET_VAL(s);
     }
 
 }
@@ -906,7 +911,8 @@ req_forward(struct context *ctx, struct conn *c_conn, struct msg *req)
         // Strictly local host only
         req->consistency = DC_ONE;
         req->rsp_handler = msg_local_one_rsp_handler;
-        local_req_forward(ctx, c_conn, req, key, keylen);
+        rstatus_t s = local_req_forward(ctx, c_conn, req, key, keylen);
+        IGNORE_RET_VAL(s)
         return;
     }
 
